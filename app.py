@@ -3,17 +3,10 @@ import time
 import numpy as np
 import streamlit as st
 import tflite_runtime.interpreter as tflite
-
-# 🚨 SAFE MEDIAPIPE IMPORT (Agar install na bhi ho toh app crash nahi hogi)
-try:
-    import mediapipe as mp
-    import mediapipe.solutions.hands as mp_hands
-    hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
-    mp_loaded = True
-    mp_error = None
-except Exception as e:
-    mp_loaded = False
-    mp_error = str(e)
+import mediapipe.solutions.hands as mp_hands
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import av
+from PIL import Image, ImageDraw
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 MODEL_PATH  = "dataset/alphabet_cnn_model.tflite"  
@@ -33,16 +26,13 @@ st.title("🤟 ASL Sign Language Translator (MediaPipe Cloud Live)")
 st.sidebar.subheader("⚙️ Camera Settings")
 flip_camera = st.sidebar.checkbox("Mirror/Flip Video", value=True)
 
-# 🚨 AUTODEBUG: MediaPipe Status Checker
-if not mp_loaded:
-    st.error(f"❌ Streamlit Cloud ne MediaPipe ko sahi se install nahi kiya! Error: {mp_error}")
-    st.warning("💡 **Hal:** Streamlit ke dashboard par ja kar is app ko **Delete** karein aur **Create App** par click kar ke naye siray se deploy karein taake cache bilkul saaf ho jaye.")
-    st.stop()
-
 # File Check
 if not os.path.exists(MODEL_PATH):
     st.error(f"❌ Model file '{MODEL_PATH}' GitHub par nahi mili!")
     st.stop()
+
+# Global Initialization (Main Thread)
+hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
 
 # Safe Global Model Loading
 @st.cache_resource
@@ -61,10 +51,6 @@ if not load_success:
     st.stop()
 else:
     st.success("✅ AI Model & MediaPipe Perfectly Loaded!")
-
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
-import av
-from PIL import Image, ImageDraw
 
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
@@ -88,8 +74,6 @@ class ASLVideoProcessor(VideoProcessorBase):
             img_rgb = img_rgb[:, ::-1, :]  # Mirror effect
             
         h, w, _ = img_rgb.shape
-        
-        # Process hands safely
         results = hands.process(img_rgb)
         
         pil_img = Image.fromarray(img_rgb)
@@ -112,7 +96,7 @@ class ASLVideoProcessor(VideoProcessorBase):
                     if x_pixel > x_max: x_max = x_pixel
                     if y_pixel > y_max: y_max = y_pixel
                 
-                # Perfect Square Cropping
+                # Perfect Square Cropping Fix
                 box_w = x_max - x_min
                 box_h = y_max - y_min
                 size = max(box_w, box_h) + 40  
@@ -168,7 +152,7 @@ class ASLVideoProcessor(VideoProcessorBase):
                     else:
                         progress = 0.0
 
-        # Interface Drawing
+        # Interface Rendering
         bar_w = int(w * progress)
         draw.rectangle([(0, h - 15), (bar_w, h)], fill=(0, 255, 100))
         draw.rectangle([(0, h - 15), (w, h)], outline=(50, 50, 50), width=1)
