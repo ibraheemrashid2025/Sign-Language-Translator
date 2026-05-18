@@ -3,7 +3,8 @@ import time
 import numpy as np
 import streamlit as st
 import tflite_runtime.interpreter as tflite
-import mediapipe as mp
+# 🚨 DIRECT SUB-MODULE IMPORTS (Fixes AttributeError: module 'mediapipe' has no attribute 'solutions')
+import mediapipe.solutions.hands as mp_hands  
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 import av
 from PIL import Image, ImageDraw
@@ -31,9 +32,7 @@ if not os.path.exists(MODEL_PATH):
     st.error(f"❌ Model file '{MODEL_PATH}' GitHub par nahi mili!")
     st.stop()
 
-# 🚨 GLOBAL INITIALIZATION (Fixes Threading Lock Error) 🚨
-# MediaPipe ko main thread par bahar hi rakhna hai jese aap ke local code mein tha
-mp_hands = mp.solutions.hands
+# 🚨 GLOBAL INITIALIZATION (Main Thread Par Direct Loading)
 hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
 
 # Safe Global Model Loading
@@ -75,7 +74,7 @@ class ASLVideoProcessor(VideoProcessorBase):
             
         h, w, _ = img_rgb.shape
         
-        # 🚨 Use globally allocated MediaPipe object safely
+        # Use globally allocated MediaPipe hands object safely
         results = hands.process(img_rgb)
         
         pil_img = Image.fromarray(img_rgb)
