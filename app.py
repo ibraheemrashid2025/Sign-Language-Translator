@@ -1,13 +1,16 @@
-import cv2
+import os
+import time
 import numpy as np
 import streamlit as st
-from tensorflow.keras.models import load_model
-import time
+import tflite_runtime.interpreter as tflite
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import av
+from PIL import Image, ImageDraw
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
-MODEL_PATH  = "model.h5"  # ← apne dost ka model file naam
-IMG_SIZE    = 64           # ← agar model alag size pe trained hai toh change karo
-HOLD_SECS   = 1.5
+MODEL_PATH  = "dataset/alphabet_cnn_model.tflite"  
+IMG_SIZE    = 64           
+HOLD_SECS   = 1.5  
 
 CLASSES = [
     'A','B','C','D','E','F','G','H','I','J','K','L','M',
@@ -18,105 +21,121 @@ CLASSES = [
 st.set_page_config(page_title="ASL Translator", layout="wide")
 st.title("🤟 ASL Sign Language Translator")
 
-@st.cache(allow_output_mutation=True)
-def load_asl_model():
-    return load_model(MODEL_PATH)
+# File & Size Checker
+if os.path.exists(MODEL_PATH):
+    file_size_mb = os.path.getsize(MODEL_PATH) / (1024 * 1024)
+    st.info(f"📁 Model File Found! Size: **{file_size_mb:.2f} MB**")
+else:
+    st.error(f"❌ Error: Model file '{MODEL_PATH}' GitHub par nahi mili!")
+    st.stop()
 
-try:
-    model = load_asl_model()
-    model_loaded = True
-except Exception as e:
-    st.error(f"Model load nahi hua: {e}\nModel.h5 file WEBCAM folder mein rakho.")
-    model_loaded = False
+# Safe Global Loading
+@st.cache_resource
+def load_my_tflite_model():
+    try:
+        interpreter = tflite.Interpreter(model_path=MODEL_PATH)
+        interpreter.allocate_tensors()
+        return interpreter, True
+    except Exception as e:
+        return str(e), False
 
-if "sentence"      not in st.session_state: st.session_state.sentence      = ""
-if "last_letter"   not in st.session_state: st.session_state.last_letter   = ""
-if "letter_start"  not in st.session_state: st.session_state.letter_start  = None
-if "letter_locked" not in st.session_state: st.session_state.letter_locked = False
+interpreter_obj, load_success = load_my_tflite_model()
 
-def predict(frame_bgr):
-    img = cv2.resize(frame_bgr, (IMG_SIZE, IMG_SIZE))
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = img.astype("float32") / 255.0
-    img = np.expand_dims(img, axis=0)
-    preds = model.predict(img, verbose=0)[0]
-    idx = np.argmax(preds)
-    return CLASSES[idx], float(preds[idx])
+if not load_success:
+    st.error(f"❌ TFLite Interpreter file ko read nahi kar pa raha: {interpreter_obj}")
+    st.stop()
+else:
+    st.success("✅ AI Model Perfectly Loaded & Ready!")
 
-if model_loaded:
-    col1, col2 = st.columns([2, 1])
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
 
-    with col2:
-        st.subheader("Current Letter")
-        letter_box = st.empty()
-        letter_box.markdown("## —")
+class ASLVideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.interpreter = interpreter_obj
+        self.input_details = self.interpreter.get_input_details()
+        self.output_details = self.interpreter.get_output_details()
+        
+        # Realtime States
+        self.sentence = ""
+        self.last_letter = ""
+        self.letter_start = None
+        self.letter_locked = False
 
-        st.subheader("Sentence")
-        sentence_box = st.empty()
-        sentence_box.markdown(f"### `{st.session_state.sentence or '...'}`")
-
-        if st.button("Delete Last"):
-            st.session_state.sentence = st.session_state.sentence[:-1]
-        if st.button("Clear All"):
-            st.session_state.sentence = ""
-
-        st.markdown("---")
-        st.markdown("""
-        **How to use:**
-        - Hold sign steady for **1.5 sec** → letter adds
-        - `nothing` = reset/pause
-        - `del` = delete last letter
-        - `space` = add space
-        """)
-
-    with col1:
-        run = st.checkbox("Start Camera")
-        frame_box = st.empty()
-
-        if run:
-            cap = cv2.VideoCapture(0)
-
-            while run:
-                ret, frame = cap.read()
-                if not ret:
-                    st.error("Camera nahi mili!")
-                    break
-
-                frame = cv2.flip(frame, 1)
-                label, conf = predict(frame)
-
-                now = time.time()
-                if label == st.session_state.last_letter:
-                    if st.session_state.letter_start is None:
-                        st.session_state.letter_start = now
-                    elapsed  = now - st.session_state.letter_start
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img_rgb = frame.to_ndarray(format="rgb24")
+        img_rgb = img_rgb[:, ::-1, :]  # Mirror effect
+        h, w, _ = img_rgb.shape
+        
+        try:
+            pil_img = Image.fromarray(img_rgb)
+            pil_img_resized = pil_img.resize((IMG_SIZE, IMG_SIZE))
+            input_data = np.array(pil_img_resized).astype("float32") / 255.0
+            input_data = np.expand_dims(input_data, axis=0)
+            
+            # Inference
+            self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
+            self.interpreter.invoke()
+            output_data = self.interpreter.get_tensor(self.output_details[0]['index'])[0]
+            
+            idx = np.argmax(output_data)
+            label = CLASSES[idx]
+            conf = float(output_data[idx])
+            
+            draw = ImageDraw.Draw(pil_img)
+            now = time.time()
+            progress = 0.0
+            
+            if conf > 0.70:
+                if label == self.last_letter:
+                    if self.letter_start is None:
+                        self.letter_start = now
+                    elapsed = now - self.letter_start
                     progress = min(elapsed / HOLD_SECS, 1.0)
-
-                    if elapsed >= HOLD_SECS and not st.session_state.letter_locked:
-                        st.session_state.letter_locked = True
+                    
+                    if elapsed >= HOLD_SECS and not self.letter_locked:
+                        self.letter_locked = True
                         if label == "del":
-                            st.session_state.sentence = st.session_state.sentence[:-1]
+                            self.sentence = self.sentence[:-1]
                         elif label == "space":
-                            st.session_state.sentence += " "
+                            self.sentence += " "
                         elif label != "nothing":
-                            st.session_state.sentence += label
+                            self.sentence += label
                 else:
-                    st.session_state.last_letter   = label
-                    st.session_state.letter_start  = now
-                    st.session_state.letter_locked = False
-                    progress = 0.0
+                    self.last_letter = label
+                    self.letter_start = now
+                    self.letter_locked = False
+            else:
+                progress = 0.0
+                
+            # Live Drawing using PIL
+            bar_w = int(w * progress)
+            draw.rectangle([(0, h - 15), (bar_w, h)], fill=(0, 255, 100))
+            draw.rectangle([(0, h - 15), (w, h)], outline=(50, 50, 50), width=1)
+            
+            lock_status = " [LOCKED]" if self.letter_locked else ""
+            disp_label = label if label != "nothing" else "Scanning..."
+            
+            draw.rectangle([(0, 0), (w, 80)], fill=(0, 0, 0, 128))
+            draw.text((20, 10), f"Sign: {disp_label}{lock_status} ({conf*100:.0f}%)", fill=(255, 255, 255))
+            draw.text((20, 45), f"Sentence: > {self.sentence if self.sentence else '...'} <", fill=(0, 255, 100))
+            
+            img_rgb = np.array(pil_img)
+                                
+        except Exception as e:
+            pass
+            
+        return av.VideoFrame.from_ndarray(img_rgb, format="rgb24")
 
-                h, w = frame.shape[:2]
-                bar_w = int(w * progress)
-                cv2.rectangle(frame, (0, h-10), (bar_w, h), (0, 255, 100), -1)
-                cv2.rectangle(frame, (0, h-10), (w, h),     (50, 50, 50),  1)
+# UI Layout
+st.markdown("---")
+st.write("👇 Neechay **Start** button par click karein aur live testing shuru karein!")
 
-                lock = " LOCKED" if st.session_state.letter_locked else ""
-                disp = label if label != "nothing" else "."
-                letter_box.markdown(f"## {disp}{lock}  ({conf*100:.0f}%)")
-                sentence_box.markdown(f"### `{st.session_state.sentence or '...'}`")
-
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame_box.image(frame_rgb, channels="RGB", width=600)
-
-            cap.release()
+webrtc_streamer(
+    key="asl-sign-language-translator",
+    video_processor_factory=ASLVideoProcessor,
+    rtc_configuration=RTC_CONFIGURATION,
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
+)
