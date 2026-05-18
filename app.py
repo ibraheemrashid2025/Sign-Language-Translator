@@ -22,10 +22,19 @@ CLASSES = [
 st.set_page_config(page_title="ASL Translator", layout="wide")
 st.title("🤟 ASL Sign Language Translator (MediaPipe Cloud Live)")
 
+# Sidebar Settings
+st.sidebar.subheader("⚙️ Camera Settings")
+flip_camera = st.sidebar.checkbox("Mirror/Flip Video", value=True)
+
 # File Check
 if not os.path.exists(MODEL_PATH):
     st.error(f"❌ Model file '{MODEL_PATH}' GitHub par nahi mili!")
     st.stop()
+
+# 🚨 GLOBAL INITIALIZATION (Fixes Threading Lock Error) 🚨
+# MediaPipe ko main thread par bahar hi rakhna hai jese aap ke local code mein tha
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
 
 # Safe Global Model Loading
 @st.cache_resource
@@ -47,16 +56,11 @@ RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
 
-# Main Multi-threaded MediaPipe + TFLite Processor Class
 class ASLVideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.interpreter = interpreter_obj
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
-        
-        # MediaPipe Hands Setup inside thread instance
-        self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
         
         # Aap ki exact local state variables
         self.sentence = ""
@@ -65,11 +69,14 @@ class ASLVideoProcessor(VideoProcessorBase):
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img_rgb = frame.to_ndarray(format="rgb24")
-        img_rgb = img_rgb[:, ::-1, :]  # Mirror effect
+        
+        if flip_camera:
+            img_rgb = img_rgb[:, ::-1, :]  # Mirror effect
+            
         h, w, _ = img_rgb.shape
         
-        # MediaPipe Processing
-        results = self.hands.process(img_rgb)
+        # 🚨 Use globally allocated MediaPipe object safely
+        results = hands.process(img_rgb)
         
         pil_img = Image.fromarray(img_rgb)
         draw = ImageDraw.Draw(pil_img)
@@ -104,22 +111,21 @@ class ASLVideoProcessor(VideoProcessorBase):
                 x_max = min(w, x_min + size)
                 y_max = min(h, y_min + size)
                 
-                # Draw Red Bounding Box on Frame
+                # Draw Red Bounding Box
                 draw.rectangle([(x_min, y_min), (x_max, y_max)], outline=(255, 0, 0), width=2)
                 
-                # Extract Hand Crop Region safely
                 if (x_max - x_min) > 10 and (y_max - y_min) > 10:
                     hand_crop = img_rgb[y_min:y_max, x_min:x_max]
                     
-                    # Convert to PIL for stable resize without cv2 graphics crash
+                    # Safe Resize using PIL
                     pil_crop = Image.fromarray(hand_crop).resize((IMG_SIZE, IMG_SIZE))
                     
-                    # TFLite Preprocessing
+                    # Preprocessing
                     input_data = np.array(pil_crop).astype("float32") / 255.0
                     input_data = np.expand_dims(input_data, axis=0)
                     input_data = np.ascontiguousarray(input_data, dtype=np.float32)
                     
-                    # Run Model
+                    # Run Inference
                     self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
                     self.interpreter.invoke()
                     output_data = self.interpreter.get_tensor(self.output_details[0]['index'])[0]
@@ -127,7 +133,6 @@ class ASLVideoProcessor(VideoProcessorBase):
                     confidence = float(np.max(output_data))
                     predicted_class = CLASSES[np.argmax(output_data)]
                     
-                    # Draw Current Class atop bounding box
                     if confidence > 0.82:
                         draw.text((x_min, max(0, y_min - 20)), f"{predicted_class} ({confidence*100:.1f}%)", fill=(0, 255, 0))
                         
@@ -147,7 +152,6 @@ class ASLVideoProcessor(VideoProcessorBase):
                                 elif predicted_class != "nothing":
                                     self.sentence += predicted_class
                                 
-                                # Reset for next sign
                                 self.hold_start_time = None
                                 self.last_detected_class = None
                         else:
@@ -157,12 +161,12 @@ class ASLVideoProcessor(VideoProcessorBase):
                         progress = 0.0
 
         # ─── LIVE INTERFACE OVERLAY DRAWING ───────────────────────────────────
-        # 1. Progress Loading Bar at bottom
+        # 1. Progress Bar
         bar_w = int(w * progress)
         draw.rectangle([(0, h - 15), (bar_w, h)], fill=(0, 255, 100))
         draw.rectangle([(0, h - 15), (w, h)], outline=(50, 50, 50), width=1)
         
-        # 2. Black Header Bar for sentence output
+        # 2. Text Overlay Panel
         draw.rectangle([(0, 0), (w, 85)], fill=(0, 0, 0, 180))
         draw.text((20, 15), "SENTENCE:", fill=(0, 255, 0))
         draw.text((20, 45), self.sentence if self.sentence else "[Empty - Hold sign for 1.5s]", fill=(255, 255, 255))
@@ -170,9 +174,9 @@ class ASLVideoProcessor(VideoProcessorBase):
         img_final = np.array(pil_img)
         return av.VideoFrame.from_ndarray(img_final, format="rgb24")
 
-# Streamlit Front-End Interface
+# UI Layout
 st.markdown("---")
-st.write("👇 Neechay **Start** button dabaayein. MediaPipe haath track karega aur text generate karega:")
+st.write("👇 **Start** button dabaayein, browser ko camera permission dein aur live testing shuru karein:")
 
 webrtc_streamer(
     key="asl-sign-language-translator",
