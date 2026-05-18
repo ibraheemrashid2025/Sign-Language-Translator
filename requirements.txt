@@ -1,7 +1,8 @@
 streamlit
 altair==4.2.2
 streamlit-webrtc
-mediapipe
+mediapipe==0.10.14
+protobuf==3.20.3
 opencv-python-headless
 tflite-runtime
 av
