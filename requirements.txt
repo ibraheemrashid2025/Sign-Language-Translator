@@ -1,7 +1,6 @@
 streamlit
 streamlit-webrtc
 mediapipe
-opencv-python-headless
 tflite-runtime
 av
 pillow
