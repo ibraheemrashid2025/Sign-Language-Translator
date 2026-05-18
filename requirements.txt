@@ -4,4 +4,4 @@ streamlit-webrtc
 tflite-runtime
 av
 pillow
-numpy
+numpy<2
