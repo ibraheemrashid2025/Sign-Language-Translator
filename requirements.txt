@@ -1,9 +1,8 @@
 streamlit
-altair==4.2.2
 streamlit-webrtc
 mediapipe
 opencv-python-headless
 tflite-runtime
 av
 pillow
-numpy<2
+numpy==1.26.4
