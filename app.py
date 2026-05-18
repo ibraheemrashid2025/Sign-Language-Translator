@@ -3,11 +3,17 @@ import time
 import numpy as np
 import streamlit as st
 import tflite_runtime.interpreter as tflite
-# 🚨 DIRECT SUB-MODULE IMPORTS (Fixes AttributeError: module 'mediapipe' has no attribute 'solutions')
-import mediapipe.solutions.hands as mp_hands  
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
-import av
-from PIL import Image, ImageDraw
+
+# 🚨 SAFE MEDIAPIPE IMPORT (Agar install na bhi ho toh app crash nahi hogi)
+try:
+    import mediapipe as mp
+    import mediapipe.solutions.hands as mp_hands
+    hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+    mp_loaded = True
+    mp_error = None
+except Exception as e:
+    mp_loaded = False
+    mp_error = str(e)
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 MODEL_PATH  = "dataset/alphabet_cnn_model.tflite"  
@@ -27,13 +33,16 @@ st.title("🤟 ASL Sign Language Translator (MediaPipe Cloud Live)")
 st.sidebar.subheader("⚙️ Camera Settings")
 flip_camera = st.sidebar.checkbox("Mirror/Flip Video", value=True)
 
+# 🚨 AUTODEBUG: MediaPipe Status Checker
+if not mp_loaded:
+    st.error(f"❌ Streamlit Cloud ne MediaPipe ko sahi se install nahi kiya! Error: {mp_error}")
+    st.warning("💡 **Hal:** Streamlit ke dashboard par ja kar is app ko **Delete** karein aur **Create App** par click kar ke naye siray se deploy karein taake cache bilkul saaf ho jaye.")
+    st.stop()
+
 # File Check
 if not os.path.exists(MODEL_PATH):
     st.error(f"❌ Model file '{MODEL_PATH}' GitHub par nahi mili!")
     st.stop()
-
-# 🚨 GLOBAL INITIALIZATION (Main Thread Par Direct Loading)
-hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
 
 # Safe Global Model Loading
 @st.cache_resource
@@ -50,6 +59,12 @@ interpreter_obj, load_success = load_my_tflite_model()
 if not load_success:
     st.error(f"❌ TFLite Interpreter load nahi ho saka: {interpreter_obj}")
     st.stop()
+else:
+    st.success("✅ AI Model & MediaPipe Perfectly Loaded!")
+
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import av
+from PIL import Image, ImageDraw
 
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
@@ -61,7 +76,7 @@ class ASLVideoProcessor(VideoProcessorBase):
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
         
-        # Aap ki exact local state variables
+        # Realtime state variables
         self.sentence = ""
         self.last_detected_class = None
         self.hold_start_time = None
@@ -74,7 +89,7 @@ class ASLVideoProcessor(VideoProcessorBase):
             
         h, w, _ = img_rgb.shape
         
-        # Use globally allocated MediaPipe hands object safely
+        # Process hands safely
         results = hands.process(img_rgb)
         
         pil_img = Image.fromarray(img_rgb)
@@ -97,10 +112,10 @@ class ASLVideoProcessor(VideoProcessorBase):
                     if x_pixel > x_max: x_max = x_pixel
                     if y_pixel > y_max: y_max = y_pixel
                 
-                # ─── AAP KI EXACT PERFECT SQUARE CROPPING LOGIC ───
+                # Perfect Square Cropping
                 box_w = x_max - x_min
                 box_h = y_max - y_min
-                size = max(box_w, box_h) + 40  # 40px padding
+                size = max(box_w, box_h) + 40  
                 
                 center_x = x_min + box_w // 2
                 center_y = y_min + box_h // 2
@@ -110,21 +125,16 @@ class ASLVideoProcessor(VideoProcessorBase):
                 x_max = min(w, x_min + size)
                 y_max = min(h, y_min + size)
                 
-                # Draw Red Bounding Box
                 draw.rectangle([(x_min, y_min), (x_max, y_max)], outline=(255, 0, 0), width=2)
                 
                 if (x_max - x_min) > 10 and (y_max - y_min) > 10:
                     hand_crop = img_rgb[y_min:y_max, x_min:x_max]
-                    
-                    # Safe Resize using PIL
                     pil_crop = Image.fromarray(hand_crop).resize((IMG_SIZE, IMG_SIZE))
                     
-                    # Preprocessing
                     input_data = np.array(pil_crop).astype("float32") / 255.0
                     input_data = np.expand_dims(input_data, axis=0)
                     input_data = np.ascontiguousarray(input_data, dtype=np.float32)
                     
-                    # Run Inference
                     self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
                     self.interpreter.invoke()
                     output_data = self.interpreter.get_tensor(self.output_details[0]['index'])[0]
@@ -135,7 +145,6 @@ class ASLVideoProcessor(VideoProcessorBase):
                     if confidence > 0.82:
                         draw.text((x_min, max(0, y_min - 20)), f"{predicted_class} ({confidence*100:.1f}%)", fill=(0, 255, 0))
                         
-                        # ─── AAP KI HOLD-TO-COMMIT TIMING LOGIC ───
                         if predicted_class == self.last_detected_class:
                             if self.hold_start_time is None:
                                 self.hold_start_time = now
@@ -159,13 +168,11 @@ class ASLVideoProcessor(VideoProcessorBase):
                     else:
                         progress = 0.0
 
-        # ─── LIVE INTERFACE OVERLAY DRAWING ───────────────────────────────────
-        # 1. Progress Bar
+        # Interface Drawing
         bar_w = int(w * progress)
         draw.rectangle([(0, h - 15), (bar_w, h)], fill=(0, 255, 100))
         draw.rectangle([(0, h - 15), (w, h)], outline=(50, 50, 50), width=1)
         
-        # 2. Text Overlay Panel
         draw.rectangle([(0, 0), (w, 85)], fill=(0, 0, 0, 180))
         draw.text((20, 15), "SENTENCE:", fill=(0, 255, 0))
         draw.text((20, 45), self.sentence if self.sentence else "[Empty - Hold sign for 1.5s]", fill=(255, 255, 255))
@@ -173,10 +180,8 @@ class ASLVideoProcessor(VideoProcessorBase):
         img_final = np.array(pil_img)
         return av.VideoFrame.from_ndarray(img_final, format="rgb24")
 
-# UI Layout
+# UI Loading
 st.markdown("---")
-st.write("👇 **Start** button dabaayein, browser ko camera permission dein aur live testing shuru karein:")
-
 webrtc_streamer(
     key="asl-sign-language-translator",
     video_processor_factory=ASLVideoProcessor,
